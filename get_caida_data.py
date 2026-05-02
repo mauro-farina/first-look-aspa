@@ -1,5 +1,7 @@
 import argparse
 import bz2
+import shutil
+import tempfile
 import requests
 
 from pathlib import Path
@@ -42,14 +44,19 @@ def process_paths_file():
 
 
 def download_and_unbz2(url: str, out_path: Path):
-    decompressor = bz2.BZ2Decompressor()
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        with open(out_path, "wb") as fout:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".bz2", dir=out_path.parent) as f:
+        tmp_path = Path(f.name)
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if not chunk:
                     continue
-                fout.write(decompressor.decompress(chunk))
+                f.write(chunk)
+
+    with bz2.open(tmp_path, "rb") as fin, open(out_path, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+
+    tmp_path.unlink(missing_ok=True)
 
 
 def main():
