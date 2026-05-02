@@ -20,9 +20,6 @@ CACHE_DIR = Path("rrc/cache")
 LOG_DIR = Path("rrc/logs")
 LOG_FILE: Path | None = None
 
-CACHE_WORKERS = 8 # Phase 1
-PARSE_WORKERS = 40  # Phase 2
-
 ROUTEVIEWS_VP_NAMES: dict[str, str] = {
     "routeviews1": "route-views1",
     "routeviews2": "route-views2",
@@ -118,7 +115,7 @@ def compress(path: list[int]) -> tuple[int, ...]:
     return tuple(compressed)
 
 
-def get_all_subpaths_as_str(path: tuple[int]) -> set[str]:
+def get_all_subpaths_as_str(path: tuple[int, ...]) -> set[str]:
     subpaths = set()
     for i in range(len(path)):
         subpath = path[i:]
@@ -179,8 +176,20 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch RRC data and retain only invalid paths.")
 
     parser.add_argument("yyyy", metavar="YYYY")
-    parser.add_argument("mm",   metavar="MM")
-    parser.add_argument("dd",   metavar="DD")
+    parser.add_argument("mm", metavar="MM")
+    parser.add_argument("dd", metavar="DD")
+    parser.add_argument(
+        "--cache-workers",
+        type=int, default=1,
+        help="parallel worker processes for cache warm-up (default: 1)",
+    )
+    parser.add_argument(
+        "--parse-workers",
+        type=int, default=1,
+        help="parallel worker processes for parsing (default: 1)"
+             "Note: workers use a LOT of RAM. For 16 GB machines, 1 worker is recommended.",
+    )
+    
     args = parser.parse_args()
 
     init_log_file(args.yyyy, args.mm, args.dd)
@@ -211,7 +220,7 @@ def main():
 
     # Phase 1: cache warm up
     log_message("Phase 1: Cache warm up")
-    with Pool(processes=CACHE_WORKERS) as pool:
+    with Pool(processes=args.cache_workers) as pool:
         # consume the iterator so we block until all downloads are done
         list(pool.imap_unordered(warm_cache, cache_tasks))
 
@@ -219,7 +228,7 @@ def main():
     log_message("Phase 2: extracting AS Paths")
     all_paths: set[str] = set()
 
-    with Pool(processes=PARSE_WORKERS) as pool:
+    with Pool(processes=args.parse_workers) as pool:
         for vp_paths in pool.imap_unordered(process_vp_ip, parse_tasks):
             all_paths |= vp_paths
 
