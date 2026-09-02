@@ -1,19 +1,19 @@
-# Submission 264
+# A First Look at ASPA: Deployment, Route Leaks, and AS Relationships
 
 This repository contains the code and data used to obtain the results and generate plots and tables for the paper.
 
 ## Notebooks
 
-> Each notebook has a configuration cell where you must set whether to render figures with Latex or not. Requires LaTeX locally installed.
+> Each notebook has a configuration cell where you must set whether to render figures with Latex or not.
 
 ### 1_Deployment
 - Time analysis and characterization of ASPA adoption.
 - All data required to run it is included in the repository.
-- Produces the following results from the paper: Figures 2, 3, 4, 5, 6
+- Produces the following results from the paper: Figures 2, 3, 4, 5, 6; Table 1.
 
 ### 2_PathVerification: 
 - ASPA path verification and route leak analysis.
-- Produces the following results from the paper: Figures 8, 9; Table 2
+- Produces the following results from the paper: Figures 8, 9; Tables 3, 6.
 - The notebook is structured into the following three subsections:
 
 #### 2.1 Find route leaks
@@ -31,7 +31,7 @@ This repository contains the code and data used to obtain the results and genera
 
 ### 3_ASRelationships
 - Comparison of CAIDA and BGPKIT providers vs ASPA-declared providers.
-- Produces the following results from the paper: Figures 10, 11; Table 3
+- Produces the following results from the paper: Figures 10, 11, 12; Table 4.
 
 ## Data included in the repository
 
