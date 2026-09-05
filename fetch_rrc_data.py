@@ -1,24 +1,24 @@
 import argparse
 import json
+import shutil
 import subprocess
 import sys
-import shutil
-import pandas as pd
-
+from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
-from datetime import datetime
 
+import pandas as pd
 
 BGPKIT_BIN = shutil.which("bgpkit-parser") or shutil.which(
     "bgpkit-parser", path=str(Path.home() / ".cargo/bin")
 )
 
 RIB_TIME = "0000"
-OUT_DIR = Path("rrc/out")
-CACHE_DIR = Path("rrc/cache")
-LOG_DIR = Path("rrc/logs")
+OUT_DIR = Path("rrc-new/out")
+LOG_DIR = Path("rrc-new/logs")
 LOG_FILE: Path | None = None
+
+NVALID_PATHS: set[str] = set()
 
 ROUTEVIEWS_VP_NAMES: dict[str, str] = {
     "routeviews1": "route-views1",
@@ -77,35 +77,6 @@ def build_url(org: str, vp_id: str, yyyy: str, mm: str, dd: str) -> str | None:
         return None
 
 
-# Phase 1 worker: cache warm-up
-def warm_cache(args: tuple) -> None:
-    org, vp_id, yyyy, mm, dd = args
-    url = build_url(org, vp_id, yyyy, mm, dd)
-    if url is None:
-        return
-
-    log_message(f"CACHE  {org}/{vp_id}")
-    cmd = [
-        "bgpkit-parser", url,
-        "--cache-dir", CACHE_DIR.as_posix(),
-        "--peer-ip", "0.0.0.0",
-        "--json",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            log_message(
-                f"Cache warm-up failed for {url}. stderr: {result.stderr.strip()}",
-                level="ERROR",
-            )
-    except FileNotFoundError:
-        log_message(
-            "bgpkit-parser not found. Make sure it is installed and on PATH.",
-            level="ERROR",
-        )
-        sys.exit(1)
-
-
 def compress(path: list[int]) -> tuple[int, ...]:
     compressed = [path[0],]
     for asn in path:
@@ -126,22 +97,40 @@ def get_all_subpaths_as_str(path: tuple[int, ...]) -> set[str]:
 
 
 # Phase 2 worker
-def process_vp_ip(args: tuple) -> set[str]:
-    org, vp_id, vp_ip, yyyy, mm, dd = args
+# org, vp_id, peer_ips, args.yyyy, args.mm, args.dd
+def process_mrt(args: tuple) -> set[str]:
+    org, vp_id, peer_ips, yyyy, mm, dd = args
     url = build_url(org, vp_id, yyyy, mm, dd)
     if url is None:
         return set()
 
-    log_message(f"PARSE  {org}/{vp_id}  peer={vp_ip}")
-    cmd = [
-        "bgpkit-parser", url,
-        "--cache-dir", CACHE_DIR.as_posix(),
-        "--peer-ip", vp_ip,
-        "--json",
+    log_message(f"PARSE  {org}/{vp_id}  peer={vp_id}")
+    cmd = ["bgpkit-parser", url, "--psv"]
+    for peer_ip in peer_ips:
+        cmd += ["--peer-ip", peer_ip]
 
-    ]
+    matched = set()
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as err_log:
+            result = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=err_log, text=True
+            )
+            assert result.stdout is not None
+
+            for line in result.stdout:
+                parts = line.strip().split("|")
+                # type|timestamp|peer_ip|peer_asn|prefix|as_path|origin_asns|origin|next_hop|...
+                if len(parts) < 6:
+                    continue
+
+                path = compress(parts[5].split())
+                for i in range(len(path) - 2):
+                    subpath = path[i:]
+                    subpath_str = '|'.join(str(s) for s in subpath)
+                    if subpath_str in INVALID_PATHS:
+                        matched.add(subpath_str)
+
     except FileNotFoundError:
         log_message(
             "bgpkit-parser not found. Make sure it is installed and on PATH.",
@@ -149,27 +138,14 @@ def process_vp_ip(args: tuple) -> set[str]:
         )
         sys.exit(1)
 
-    if result.returncode != 0:
-        log_message(
-            f"bgpkit-parser exited {result.returncode} for {url} peer={vp_ip}. "
-            f"stderr: {result.stderr.strip()}",
-            level="ERROR",
-        )
-        return set()
+    return matched
 
-    paths: set[str] = set()
-    output = result.stdout.strip()
-    if not output:
-        return paths
 
-    for line in output.splitlines():
-        elem = json.loads(line)
-        path_list = elem.get("as_path", [])
-        path_compressed = compress(path_list)
-        all_subpaths = get_all_subpaths_as_str(path_compressed)
-        paths |= all_subpaths
-
-    return paths
+def init_worker(invalid_paths: set[str], log_file: Path) -> None:
+    """Sub-processes need the invalid_paths set."""
+    global INVALID_PATHS, LOG_FILE
+    INVALID_PATHS = invalid_paths
+    LOG_FILE = log_file
 
 
 def main():
@@ -179,15 +155,9 @@ def main():
     parser.add_argument("mm", metavar="MM")
     parser.add_argument("dd", metavar="DD")
     parser.add_argument(
-        "--cache-workers",
-        type=int, default=1,
-        help="parallel worker processes for cache warm-up (default: 1)",
-    )
-    parser.add_argument(
         "--parse-workers",
-        type=int, default=1,
-        help="parallel worker processes for parsing (default: 1)"
-             "Note: workers use a LOT of RAM. For 16 GB machines, 1 worker is recommended.",
+        type=int, default=6,
+        help="parallel worker processes for parsing (default: 6)"
     )
     
     args = parser.parse_args()
@@ -195,83 +165,43 @@ def main():
     init_log_file(args.yyyy, args.mm, args.dd)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     if BGPKIT_BIN is None:
         log_message("bgpkit-parser not found on PATH or in ~/.cargo/bin", level="ERROR")
         sys.exit(1)
 
-
-    df = pd.read_csv('data/target_rrc_vps.csv', names=["org", "peer", "vp_ip"])
-    df = df.dropna(subset=["vp_ip"])
-    df = df.sample(frac=1)
-
-    # Phase 1 tasks
-    cache_tasks: list[tuple] = []
-    for vp_id, group in df.groupby("peer"):
-        org = group["org"].iloc[0]
-        cache_tasks.append((org, vp_id, args.yyyy, args.mm, args.dd))
-
-    # Phase 2 tasks
-    parse_tasks: list[tuple] = [
-        (row.org, row.peer, row.vp_ip, args.yyyy, args.mm, args.dd)
-        for row in df.itertuples(index=False)
-    ]
-
-    # Phase 1: cache warm up
-    log_message("Phase 1: Cache warm up")
-    with Pool(processes=args.cache_workers) as pool:
-        # consume the iterator so we block until all downloads are done
-        list(pool.imap_unordered(warm_cache, cache_tasks))
-
-    # Phase 2: parse, one task per vp_ip
-    log_message("Phase 2: extracting AS Paths")
-    all_paths: set[str] = set()
-
-    with Pool(processes=args.parse_workers) as pool:
-        for vp_paths in pool.imap_unordered(process_vp_ip, parse_tasks):
-            all_paths |= vp_paths
-
-
-    # Phase 3: cleanup and output
+    #  LOAD INVALID PATHS
     invalid_paths: set[str] = set()
     with open("data/2026-03-invalid-paths.txt", "r") as f:
         for line in f:
-            path = line.strip()
-            invalid_paths.add(path)
+            invalid_paths.add(line.strip())
+
+    df = pd.read_csv('data/target_rrc_vps.csv', names=["org", "peer", "vp_ip"])
+    df = df.dropna(subset=["vp_ip"])
+    # df = df.sample(frac=1)
+
+    tasks: list[tuple] = []
+    for vp_id, group in df.groupby("peer"):
+        org = group["org"].iloc[0]
+        peer_ips = frozenset(group["vp_ip"].astype(str))
+        tasks.append((org, vp_id, peer_ips, args.yyyy, args.mm, args.dd))
 
     matched_paths: set[str] = set()
-    for path in all_paths:
-        if path in invalid_paths:
-            matched_paths.add(path)
-            
+
+    with Pool(
+        processes=args.parse_workers,
+        initializer=init_worker,
+        initargs=(invalid_paths, LOG_FILE),
+    ) as pool:
+        for paths in pool.imap_unordered(process_mrt, tasks):
+            matched_paths |= paths
+
     # Write final output
     date_tag = f"{args.yyyy}-{args.mm}-{args.dd}"
     out_path = OUT_DIR / f"{date_tag}.txt"
     with open(out_path, "w") as f:
         for p in matched_paths:
             f.write(f"{p}\n")
-
-    # Clear cache
-    date_token = f"{args.yyyy}{args.mm}{args.dd}.{RIB_TIME}"
-    for cache_path in CACHE_DIR.glob(f"*{date_token}*"):
-        try:
-            if cache_path.is_file() or cache_path.is_symlink():
-                cache_path.unlink()
-            else:
-                log_message(
-                    f"Skipped non-file cache entry: {cache_path}",
-                    level="WARN",
-                )
-        except OSError as exc:
-            log_message(
-                f"Failed removing cache entry {cache_path}: {exc}",
-                level="ERROR",
-            )
-
-    log_message("Cache cleanup complete")
-    print(f"Done: {date_tag}")
-    log_message("Done")
 
 
 if __name__ == "__main__":
